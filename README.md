@@ -1,4 +1,4 @@
-A sleek and responsive web application designed to help developers prepare for technical interviews by generating customized interview questions based on role, level, and tech stack. The platform uses the power of AI to provide tailored interview scenarios for frontend, backend, full-stack, and more — enabling users to practice efficiently and confidently.
+A sleek and responsive web application designed to help candidates prepare for interviews by generating customized interview questions based on role, level, and tech stack. The platform uses the power of AI to provide tailored interview scenarios for frontend, backend, full-stack, and more — enabling users to practice efficiently and confidently.
 
 
 
