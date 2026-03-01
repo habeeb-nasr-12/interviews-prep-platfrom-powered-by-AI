@@ -97,6 +97,82 @@ export const mappings = {
   "aws amplify": "amplify",
 };
 
+export const generator: CreateAssistantDTO = {
+  name: "Interview Generator",
+  firstMessage:
+    "Hi! I'm here to set up a personalised mock interview for you. What job role are you preparing for?",
+  transcriber: {
+    provider: "deepgram",
+    model: "nova-2",
+    language: "en",
+  },
+  voice: {
+    provider: "11labs",
+    voiceId: "sarah",
+    stability: 0.4,
+    similarityBoost: 0.8,
+    speed: 0.9,
+    style: 0.5,
+    useSpeakerBoost: true,
+  },
+  model: {
+    provider: "openai",
+    model: "gpt-4",
+    messages: [
+      {
+        role: "system",
+        content: `You are an interview setup assistant. Collect the following five details from the user one at a time through natural conversation:
+
+1. Job role (e.g. Frontend Developer, Backend Engineer, Data Scientist)
+2. Experience level — must be one of: junior, mid, or senior
+3. Tech stack — (e.g. React, Node.js, TypeScript)
+4. Interview focus — must be one of: technical, behavioural, or mixed
+5. Number of questions — a number between 3 and 10
+
+Ask for each piece of information conversationally. Once you have all five, call the generateInterview function immediately. After calling it, say exactly: "Your interview has been generated! I'll take you to the dashboard now — good luck!" then end the call.
+
+Keep all responses short and conversational — this is a voice call.`,
+      },
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "generateInterview",
+          description:
+            "Generates the mock interview questions and saves the interview. Call this once all five parameters have been collected.",
+          parameters: {
+            type: "object",
+            properties: {
+              role: {
+                type: "string",
+                description: "The job role for the interview",
+              },
+              level: {
+                type: "string",
+                description: "Experience level: junior, mid, or senior",
+              },
+              techstack: {
+                type: "string",
+                description: "Comma-separated list of technologies",
+              },
+              type: {
+                type: "string",
+                description: "Interview focus: technical, behavioural, or mixed",
+              },
+              amount: {
+                type: "number",
+                description: "Number of questions (3-10)",
+              },
+            },
+            required: ["role", "level", "techstack", "type", "amount"],
+          },
+        },
+      },
+    ],
+  },
+};
+
 export const interviewer: CreateAssistantDTO = {
   name: "Interviewer",
   firstMessage:
@@ -145,45 +221,27 @@ Conclude the interview properly:
 Thank the candidate for their time.
 Inform them that the company will reach out soon with feedback.
 End the conversation on a polite and positive note.
-
+Once you have said your closing remarks, you MUST call the endCall function to end the call.
 
 - Be sure to be professional and polite.
 - Keep all your responses short and simple. Use official language, but be kind and welcoming.
 - This is a voice conversation, so keep your responses short, like in a real conversation. Don't ramble for too long.`,
       },
     ],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tools: [{ type: "endCall" } as any],
   },
 };
 
 export const feedbackSchema = z.object({
   totalScore: z.number(),
-  categoryScores: z.tuple([
+  categoryScores: z.array(
     z.object({
-      name: z.literal("Communication Skills"),
+      name: z.string(),
       score: z.number(),
       comment: z.string(),
-    }),
-    z.object({
-      name: z.literal("Technical Knowledge"),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal("Problem Solving"),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal("Cultural Fit"),
-      score: z.number(),
-      comment: z.string(),
-    }),
-    z.object({
-      name: z.literal("Confidence and Clarity"),
-      score: z.number(),
-      comment: z.string(),
-    }),
-  ]),
+    })
+  ),
   strengths: z.array(z.string()),
   areasForImprovement: z.array(z.string()),
   finalAssessment: z.string(),

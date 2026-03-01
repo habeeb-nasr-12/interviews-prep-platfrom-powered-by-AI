@@ -1,12 +1,11 @@
 "use client";
 
 import Image from "next/image";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { vapi } from "@/lib/vapi.sdk";
-import { interviewer } from "@/constants";
-import { createFeedback } from "@/lib/actions/general.action";
+import { interviewer, generator } from "@/constants";
 
 enum CallStatus {
   INACTIVE = "INACTIVE",
@@ -30,9 +29,13 @@ interface AgentProps {
 
 interface Message {
   type: string;
-  transcriptType: string;
-  role: "user" | "system" | "assistant";
-  transcript: string;
+  transcriptType?: string;
+  role?: "user" | "system" | "assistant";
+  transcript?: string;
+  functionCall?: {
+    name: string;
+    parameters: unknown;
+  };
 }
 
 const Agent = ({ userName, userId, type, interviewId, questions }: AgentProps) => {
@@ -41,6 +44,14 @@ const Agent = ({ userName, userId, type, interviewId, questions }: AgentProps) =
   const [messages, setMessages] = useState<SavedMessage[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [lastMessage, setLastMessage] = useState<string>("");
+  // Prevent the post-call action (navigate / generate feedback) from firing more
+  // than once. The combined effect below re-runs whenever `messages` changes,
+  // so without this guard it would call router.push / createFeedback on every
+  // late-arriving transcript while callStatus is already FINISHED.
+  const hasHandledCallEnd = useRef(false);
+  // Always hold the latest messages so the feedback action captures the full
+  // transcript even though it's triggered from the callStatus effect.
+  const messagesRef = useRef<SavedMessage[]>([]);
 
   useEffect(() => {
     const onCallStart = () => {
@@ -52,9 +63,64 @@ const Agent = ({ userName, userId, type, interviewId, questions }: AgentProps) =
     };
 
     const onMessage = (message: Message) => {
-      if (message.type === "transcript" && message.transcriptType === "final") {
-        const newMessage = { role: message.role, content: message.transcript };
+      if (
+        message.type === "transcript" &&
+        message.transcriptType === "final" &&
+        message.role &&
+        message.transcript
+      ) {
+        const newMessage: SavedMessage = { role: message.role, content: message.transcript };
         setMessages((prev) => [...prev, newMessage]);
+      }
+
+      // Client-side tool calling: CreateFunctionToolDTO (tools array) sends
+      // "tool-calls" messages (NOT "function-call") to the client by default.
+      // Arguments arrive as a JSON string and must be parsed.
+      if (message.type === "tool-calls") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const toolCallList = (message as any).toolCallList as Array<{
+          id: string;
+          function: { name: string; arguments: string | Record<string, unknown> };
+        }>;
+
+        const toolCall = toolCallList?.find(
+          (tc) => tc.function.name === "generateInterview"
+        );
+        if (!toolCall) return;
+
+        const args =
+          typeof toolCall.function.arguments === "string"
+            ? JSON.parse(toolCall.function.arguments)
+            : toolCall.function.arguments;
+
+        fetch("/api/vapi/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...args, userid: userId }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            vapi.send({
+              type: "add-message",
+              message: {
+                role: "tool" as const,
+                tool_call_id: toolCall.id,
+                content: data.success
+                  ? "Interview generated successfully."
+                  : "Failed to generate interview.",
+              },
+            });
+          })
+          .catch(() => {
+            vapi.send({
+              type: "add-message",
+              message: {
+                role: "tool" as const,
+                tool_call_id: toolCall.id,
+                content: "Failed to generate interview.",
+              },
+            });
+          });
       }
     };
 
@@ -88,34 +154,40 @@ const Agent = ({ userName, userId, type, interviewId, questions }: AgentProps) =
   }, []);
 
 
-  const handleGenerateFeedBack = async () => {
+  // Keep ref in sync so the callStatus effect always sees the latest messages.
+  messagesRef.current = messages;
 
-    const { success, feedbackId: id } = await createFeedback({
-      interviewId: interviewId!,
-      userId: userId,
-      transcript: messages
-    })
-    if (success && id) {
-      router.push(`/interview/${interviewId}/feedback/`)
-    } else {
-      console.log("failed to generate feedback")
-      router.push('/')
-    }
-  }
-
+  // Update the displayed transcript line whenever a new message arrives.
   useEffect(() => {
     if (messages.length > 0) {
       setLastMessage(messages[messages.length - 1].content);
     }
+  }, [messages]);
 
-    if (callStatus === CallStatus.FINISHED) {
-      if (type === "generate") {
-        router.push("/");
-      } else {
-        handleGenerateFeedBack();
-      }
+  // Handle end-of-call navigation / feedback generation exactly once.
+  useEffect(() => {
+    if (callStatus !== CallStatus.FINISHED || hasHandledCallEnd.current) return;
+    hasHandledCallEnd.current = true;
+
+    if (type === "generate") {
+      router.push("/");
+    } else {
+      // Use keepalive:true so the browser keeps the request alive even after
+      // the client-side navigation below — this guarantees feedback is saved.
+      fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interviewId,
+          userId,
+          transcript: messagesRef.current,
+        }),
+        keepalive: true,
+      });
+      router.push(`/interview/${interviewId}/feedback`);
     }
-  }, [messages, callStatus, router, type, userId, interviewId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callStatus]);
 
   const handleDisconnect = () => {
     setCallStatus(CallStatus.FINISHED);
@@ -124,29 +196,25 @@ const Agent = ({ userName, userId, type, interviewId, questions }: AgentProps) =
 
   const handleCall = async () => {
     setCallStatus(CallStatus.CONNECTING);
-    if (type === "generate") {
-      try {
-        await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
+    // Reset guard so a second call in the same session works correctly.
+    hasHandledCallEnd.current = false;
+
+    try {
+      if (type === "generate") {
+        await vapi.start(generator);
+      } else {
+        const formattedQuestions = questions
+          ? questions.map((q: string) => `- ${q}\n`).join("\n")
+          : "";
+        await vapi.start(interviewer, {
           variableValues: {
-            username: userName,
-            userid: userId,
-            type,
+            questions: formattedQuestions,
           },
         });
-      } catch (error) {
-        console.error("Failed to start vapi:", error);
-        setCallStatus(CallStatus.INACTIVE);
       }
-    } else {
-      let formattedQuestions = "";
-      if (questions) {
-        formattedQuestions = questions.map((question: string) => `- ${question}\n`).join('\n');
-      }
-      await vapi.start(interviewer, {
-        variableValues: {
-          questions: formattedQuestions,
-        },
-      });
+    } catch (error) {
+      console.error("Failed to start call:", error);
+      setCallStatus(CallStatus.INACTIVE);
     }
   };
 
@@ -201,7 +269,11 @@ const Agent = ({ userName, userId, type, interviewId, questions }: AgentProps) =
 
       <div className="w-full flex justify-center">
         {callStatus !== CallStatus.ACTIVE ? (
-          <button className="relative btn-call mt-4" onClick={handleCall}>
+          <button
+            className="relative btn-call mt-4"
+            onClick={handleCall}
+            disabled={callStatus === CallStatus.CONNECTING}
+          >
             <span
               className={cn(
                 "absolute animate-ping rounded-full opacity-75",
